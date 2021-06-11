@@ -30,13 +30,29 @@ printf("%s", s->buf);
 
 
 
-
 ---
 Q:Redis为什么使用sds来代替c的字符串？
 A:c语言的字符串不能满足Redis对字符串在安全性，效率以及功能方面的要求。
   - c语言字符串不记录自身的长度信息，为了获取字符串长度，需要遍历整个字符串，时间复杂度为O(n)
   - 容易造成缓冲区溢出
   - 内存重分配次数增多
+  - 非二进制安全 只能保存文本数据，不能保存像图片，音频，视频，压缩文件这样的二进制数据 
+![image](https://user-images.githubusercontent.com/26846402/121624132-8bde1700-caa3-11eb-93b0-b2b71cde531b.png)
+
+![image](https://user-images.githubusercontent.com/26846402/121537243-55b67e00-ca36-11eb-80ed-c5a1f3181612.png)
+
+<pre>
+|---------------|
+|len |free |buf |
+|---------------|
+^          ^
+|          | 
+|          sds
+sdshdr *sh
+
+sh = (void*) (s-(sizeof(struct sdshdr)));
+即sds-8获取到sdshdr的位置
+</pre>
 
 ## 空间预分配和惰性空间释放
 ```c
@@ -66,7 +82,9 @@ sds sdsMakeRoomFor(sds s, size_t addlen) {
   *  如果sds的长度小于1MB 则设置free的长度与len的长度一样 
   *  如果sds的长度大于1MB 则设置free长度为1MB
 - 惰性分配
-    惰性空间释放用于优化SDS的字符串缩短操作
+    惰性空间释放用于优化SDS的字符串缩短操作,当SDS的API需要缩短SDS保存的字符串时，程序并不立即使用内存重分配来回收缩短后多出来的字节，而是使用free属性将这些字节的数量记录起来，留待将来使用
+    
+<br/>  
 在扩展SDS空间之前,SDS会先检查未使用空间是否足够,如果足够的话会直接使用未分配的空间，无须执行再分配，通过预分配策略，可以减少分配次数
 
 
