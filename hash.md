@@ -88,5 +88,3 @@ static void _dictReset(dict *ht) {
 ![](https://res.weread.qq.com/wrepub/epub_622000_28)
 
 
-![image](https://user-images.githubusercontent.com/26846402/121670444-03319c00-cae0-11eb-8c15-a0151b015891.png)
-
