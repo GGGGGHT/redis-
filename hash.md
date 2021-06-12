@@ -88,3 +88,67 @@ static void _dictReset(dict *ht) {
 ![](https://res.weread.qq.com/wrepub/epub_622000_28)
 
 
+#Rehash
+```c
+int dictRehash(dict *d, int n) {
+    // 一次只处理10n
+    int empty_visits = n*10; /* Max number of empty buckets to visit. */
+    if (!dictIsRehashing(d)) return 0;
+    // ht[0]非空
+    while(n-- && d->ht[0].used != 0) {
+        dictEntry *de, *nextde;
+
+        /* Note that rehashidx can't overflow as we are sure there are more
+         * elements because ht[0].used != 0 */
+        assert(d->ht[0].size > (unsigned long)d->rehashidx);
+        while(d->ht[0].table[d->rehashidx] == NULL) {
+            d->rehashidx++;
+            if (--empty_visits == 0) return 1;
+        }
+        de = d->ht[0].table[d->rehashidx];
+        /* Move all the keys in this bucket from the old to the new hash HT */
+        // 将所有的key从旧桶中移动到新桶
+        while(de) {
+            uint64_t h;
+
+            nextde = de->next;
+            /* Get the index in the new hash table */
+            // 找到在新桶中的位置 
+            h = dictHashKey(d, de->key) & d->ht[1].sizemask;
+            de->next = d->ht[1].table[h];
+            d->ht[1].table[h] = de;
+            d->ht[0].used--;
+            d->ht[1].used++;
+            de = nextde;
+        }
+        d->ht[0].table[d->rehashidx] = NULL;
+        d->rehashidx++;
+    }
+
+    /* Check if we already rehashed the whole table... */
+    // 如果rehash过了 释放ht[0],并将ht[0]指向ht[1],重新申请一个新的ht[1] 供下次rehash使用
+    if (d->ht[0].used == 0) {
+        zfree(d->ht[0].table);
+        d->ht[0] = d->ht[1];
+        _dictReset(&d->ht[1]);
+        d->rehashidx = -1;
+        return 0;
+    }
+
+    /* More to rehash... */
+    return 1;
+}
+```
+
+rehash的目的: 为了让哈希表的负载因子维持在一个合理的范围之内
+何时触发rehash: redis会触发`后台`操作,如`关闭超时连接`,`key过期`,`重新分配大小`,`rehash`.  跟配置文件中的<b>hz</b>参数配置有关 默认是10 范围在1-500内,并不是上述所有的操作都是同频率执行,redis会检查`hz`的值 当`hz`参数被增大时,会更加消耗CPU资源,当有许多键同时过期时可以提高响应率
+
+
+# API
+```c
+// 新建hash表
+dict *dictCreate(dictType *type, void *privDataPtr)
+// 添加元素到hash表中
+int dictAdd(dict *d, void *key, void *val) 
+
+```
