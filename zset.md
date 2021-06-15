@@ -44,3 +44,6 @@ zskiplist *zslCreate(void)
 void zslFreeNode(zskiplistNode *node)
 将给定的成员插入跳表中 最坏O(N)
 zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj)
+
+---
+zset的编码可以是`OBJ_ENCODING_ZIPLIST`或者`OBJ_ENCODING_SKIPLIST`
