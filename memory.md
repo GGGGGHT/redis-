@@ -57,3 +57,6 @@ struct sharedObjectsStruct {
 #define REDIS_SHARED_BULKHDR_LEN 32
 
 ```
+
+`OBJECT IDLETIME`命令可以打印出给定键的空转时长(多长时间没有被读取/写入) 这一空转时间是通过将`当前时间`  - `键的值对象的lru时间计算得出`
+键的空转时长还有另外一项作用: 如果服务器打开了maxmemory选项，并且服务器用于回收内存的算法为`volatile-lru`或者`allkeys-lru`,那么当服务器占用的内存超过了`maxmemroy`选项所设置的上限值时，空转时长较高的那部分键会优先被服务器释放，从而回收内存。
