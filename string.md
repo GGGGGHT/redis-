@@ -58,3 +58,37 @@ Caused by: io.lettuce.core.RedisCommandExecutionException: ERR Protocol error: i
 	at io.netty.util.concurrent.FastThreadLocalRunnable.run(FastThreadLocalRunnable.java:30) ~[netty-common-4.1.65.Final.jar:4.1.65.Final]
 	at java.base/java.lang.Thread.run(Thread.java:834) ~[na:na]
 ```
+
+```
+127.0.0.1:6379> set msg "hello"
+OK
+127.0.0.1:6379> object encoding msg
+"embstr"
+127.0.0.1:6379> set str "123456789012345678901234567890123456789"
+OK
+127.0.0.1:6379> STRLEN str
+(integer) 39
+127.0.0.1:6379> object encoding str
+"embstr"
+127.0.0.1:6379> append str "1"
+(integer) 40
+127.0.0.1:6379> object encoding str
+"raw"
+```
+
+```c
+/* Create a string object with EMBSTR encoding if it is smaller than
+ * REIDS_ENCODING_EMBSTR_SIZE_LIMIT, otherwise the RAW encoding is
+ * used.
+ *
+ * The current limit of 39 is chosen so that the biggest string object
+ * we allocate as EMBSTR will still fit into the 64 byte arena of jemalloc. */
+#define REDIS_ENCODING_EMBSTR_SIZE_LIMIT 39
+robj *createStringObject(char *ptr, size_t len) {
+    if (len <= REDIS_ENCODING_EMBSTR_SIZE_LIMIT)
+        return createEmbeddedStringObject(ptr,len);
+    else
+        return createRawStringObject(ptr,len);
+}
+```
+当字符串长度小于等于`39`时，使用embstr编码 当长度大于39后 使用raw编码
