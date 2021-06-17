@@ -613,3 +613,129 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
 }
 
 ```
+
+## 删除键
+```c
+void delCommand(client *c) {
+    delGenericCommand(c,server.lazyfree_lazy_user_del);
+}
+
+
+/* This command implements DEL and LAZYDEL. */
+void delGenericCommand(client *c, int lazy) {
+    int numdel = 0, j;
+
+    for (j = 1; j < c->argc; j++) {
+        expireIfNeeded(c->db,c->argv[j]);
+        int deleted  = lazy ? dbAsyncDelete(c->db,c->argv[j]) :
+                              dbSyncDelete(c->db,c->argv[j]);
+        if (deleted) {
+            signalModifiedKey(c,c->db,c->argv[j]);
+            notifyKeyspaceEvent(NOTIFY_GENERIC,
+                "del",c->argv[j],c->db->id);
+            server.dirty++;
+            numdel++;
+        }
+    }
+    addReplyLongLong(c,numdel);
+}
+
+/* Delete a key, value, and associated expiration entry if any, from the DB.
+ * If there are enough allocations to free the value object may be put into
+ * a lazy free list instead of being freed synchronously. The lazy free list
+ * will be reclaimed in a different bio.c thread. */
+#define LAZYFREE_THRESHOLD 64
+// 可以异步释放
+int dbAsyncDelete(redisDb *db, robj *key) {
+    /* Deleting an entry from the expires dict will not free the sds of
+     * the key, because it is shared with the main dictionary. */
+    if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
+
+    /* If the value is composed of a few allocations, to free in a lazy way
+     * is actually just slower... So under a certain limit we just free
+     * the object synchronously. */
+    dictEntry *de = dictUnlink(db->dict,key->ptr);
+    if (de) {
+        robj *val = dictGetVal(de);
+        size_t free_effort = lazyfreeGetFreeEffort(val);
+
+        /* If releasing the object is too much work, do it in the background
+         * by adding the object to the lazy free list.
+         * Note that if the object is shared, to reclaim it now it is not
+         * possible. This rarely happens, however sometimes the implementation
+         * of parts of the Redis core may call incrRefCount() to protect
+         * objects, and then call dbDelete(). In this case we'll fall
+         * through and reach the dictFreeUnlinkedEntry() call, that will be
+         * equivalent to just calling decrRefCount(). */
+        if (free_effort > LAZYFREE_THRESHOLD && val->refcount == 1) {
+            atomicIncr(lazyfree_objects,1);
+            bioCreateBackgroundJob(BIO_LAZY_FREE,val,NULL,NULL);
+            dictSetVal(db->dict,de,NULL);
+        }
+    }
+
+    /* Release the key-val pair, or just the key if we set the val
+     * field to NULL in order to lazy free it later. */
+    if (de) {
+        dictFreeUnlinkedEntry(db->dict,de);
+        if (server.cluster_enabled) slotToKeyDel(key->ptr);
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+```
+
+## getCommand
+```c
+// 为什么get命令没有返回？
+void getCommand(client *c) {
+    getGenericCommand(c);
+}
+
+int getGenericCommand(client *c) {
+    robj *o;
+
+    if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.null[c->resp])) == NULL)
+        return C_OK;
+    
+    // 找到的值不是string类型 返回错误
+    if (o->type != OBJ_STRING) {
+        addReply(c,shared.wrongtypeerr);
+        return C_ERR;
+    } else {
+        // 使用找到的值 将找到的值封装到client中
+        addReplyBulk(c,o);
+        return C_OK;
+    }
+}
+
+/* Add a Redis Object as a bulk reply */
+void addReplyBulk(client *c, robj *obj) {
+    addReplyBulkLen(c,obj);
+    addReply(c,obj);
+    addReply(c,shared.crlf);
+}
+
+/* Add the object 'obj' string representation to the client output buffer. */
+// 将找到的对象封装到客户端的缓冲区中
+void addReply(client *c, robj *obj) {
+    if (prepareClientToWrite(c) != C_OK) return;
+
+    if (sdsEncodedObject(obj)) {
+        if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != C_OK)
+            _addReplyProtoToList(c,obj->ptr,sdslen(obj->ptr));
+    } else if (obj->encoding == OBJ_ENCODING_INT) {
+        /* For integer encoded strings we just convert it into a string
+         * using our optimized function, and attach the resulting string
+         * to the output buffer. */
+        char buf[32];
+        size_t len = ll2string(buf,sizeof(buf),(long)obj->ptr);
+        if (_addReplyToBuffer(c,buf,len) != C_OK)
+            _addReplyProtoToList(c,buf,len);
+    } else {
+        serverPanic("Wrong obj->encoding in addReply()");
+    }
+}
+```
