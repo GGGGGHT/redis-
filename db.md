@@ -742,5 +742,31 @@ void addReply(client *c, robj *obj) {
 
 ## 过期
 ```
+/* Set an expire to the specified key. If the expire is set in the context
+ * of an user calling a command 'c' is the client, otherwise 'c' is set
+ * to NULL. The 'when' parameter is the absolute unix time in milliseconds
+ * after which the key will no longer be considered valid. */
+void setExpire(client *c, redisDb *db, robj *key, long long when) {
+    dictEntry *kde, *de;
 
+    /* Reuse the sds from the main dict in the expire dict */
+    kde = dictFind(db->dict,key->ptr);
+    serverAssertWithInfo(NULL,key,kde != NULL);
+    de = dictAddOrFind(db->expires,dictGetKey(kde));
+    dictSetSignedIntegerVal(de,when);
+
+    int writable_slave = server.masterhost && server.repl_slave_ro == 0;
+    if (c && writable_slave && !(c->flags & CLIENT_MASTER))
+        rememberSlaveKeyWithExpire(db,key);
+}
 ```
+
+设置过期时间的几种方式:
+
+1. EXPIRE <key> <ttl> 用于将键key的生存时间设置为ttl秒
+2. PEXPIRE <key> <ttl> 用于将键key的生存时间设置为ttl毫秒
+3. EXPIREAT <key> <timestamp> 用于将键key的过期时间设置为timestamp所指定的秒数时间
+4. PEXPIREAT <key> <timestamp> 用于将键key的过期时间设置为timestamp所指定的秒数时间
+    
+    
+    
