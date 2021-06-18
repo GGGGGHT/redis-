@@ -767,6 +767,9 @@ void setExpire(client *c, redisDb *db, robj *key, long long when) {
 2. PEXPIRE <key> <ttl> 用于将键key的生存时间设置为ttl毫秒
 3. EXPIREAT <key> <timestamp> 用于将键key的过期时间设置为timestamp所指定的秒数时间
 4. PEXPIREAT <key> <timestamp> 用于将键key的过期时间设置为timestamp所指定的秒数时间
-    
+ 
+  
+取消过期的方式:
+PEXPIREAT <key> <timestamp>  PEXPIREAT是PEXPIREAT命令的反操作
     
     
