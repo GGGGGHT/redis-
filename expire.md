@@ -16,6 +16,8 @@ Redis keys过期有两种方式：被动和主动方式。
 ---
 定期删除与`HZ`参数配置有关
 通过使用定时器,定时删除策略可以保证过期键会尽可以快地被删除,并释放过期键所占用的内存.
+
+定期删除
 ```c
 void activeExpireCycle(int type) {
     /* This function has some global state in order to continue the work
@@ -135,3 +137,84 @@ void activeExpireCycle(int type) {
     }
 }
 ```
+
+## 主动删除
+在访问该键时会判断是否需要删除
+```c
+int expireIfNeeded(redisDb *db, robj *key) {
+    mstime_t when = getExpire(db,key);
+    mstime_t now;
+
+    if (when < 0) return 0; /* No expire for this key */
+
+    /* Don't expire anything while loading. It will be done later. */
+    if (server.loading) return 0;
+
+    /* If we are in the context of a Lua script, we claim that time is
+     * blocked to when the Lua script started. This way a key can expire
+     * only the first time it is accessed and not in the middle of the
+     * script execution, making propagation to slaves / AOF consistent.
+     * See issue #1525 on Github for more information. */
+    now = server.lua_caller ? server.lua_time_start : mstime();
+
+    /* If we are running in the context of a slave, return ASAP:
+     * the slave key expiration is controlled by the master that will
+     * send us synthesized DEL operations for expired keys.
+     *
+     * Still we try to return the right information to the caller,
+     * that is, 0 if we think the key should be still valid, 1 if
+     * we think the key is expired at this time. */
+     // 向调用者发送是否过期 如果master不为空的情况下
+    if (server.masterhost != NULL) return now > when;
+
+    /* Return when this key has not expired */
+    if (now <= when) return 0;
+
+    /* Delete the key */
+    // 由主节点进行删除key
+    server.stat_expiredkeys++;
+    // 向slave节点传播过期的操作,保存AOF文件
+    propagateExpire(db,key);
+    notifyKeyspaceEvent(REDIS_NOTIFY_EXPIRED,
+        "expired",key,db->id);
+    return dbDelete(db,key);
+}
+
+/* Propagate expires into slaves and the AOF file.
+ * When a key expires in the master, a DEL operation for this key is sent
+ * to all the slaves and the AOF file if enabled.
+ *
+ * This way the key expiry is centralized in one place, and since both
+ * AOF and the master->slave link guarantee operation ordering, everything
+ * will be consistent even if we allow write operations against expiring
+ * keys. */
+void propagateExpire(redisDb *db, robj *key) {
+    robj *argv[2];
+
+    argv[0] = shared.del;
+    argv[1] = key;
+    incrRefCount(argv[0]);
+    incrRefCount(argv[1]);
+     // 追加过期
+    if (server.aof_state != REDIS_AOF_OFF)
+        feedAppendOnlyFile(server.delCommand,db->id,argv,2);
+    replicationFeedSlaves(server.slaves,db->id,argv,2);
+
+    decrRefCount(argv[0]);
+    decrRefCount(argv[1]);
+}
+
+/* Delete a key, value, and associated expiration entry if any, from the DB */
+// 删除
+int dbDelete(redisDb *db, robj *key) {
+    /* Deleting an entry from the expires dict will not free the sds of
+     * the key, because it is shared with the main dictionary. */
+    if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
+    if (dictDelete(db->dict,key->ptr) == DICT_OK) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+```
+主从模式下的过期是由`master`节点来控制的,当发现某个key过期后,主机将会发送del的操作给其他的slave节点,并保存`AOF`文件
