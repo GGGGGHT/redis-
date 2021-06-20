@@ -209,7 +209,9 @@ void propagateExpire(redisDb *db, robj *key) {
 int dbDelete(redisDb *db, robj *key) {
     /* Deleting an entry from the expires dict will not free the sds of
      * the key, because it is shared with the main dictionary. */
+    // 删除expire里的key 
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
+    // 删除dict里的key
     if (dictDelete(db->dict,key->ptr) == DICT_OK) {
         return 1;
     } else {
