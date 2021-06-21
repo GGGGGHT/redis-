@@ -38,6 +38,7 @@ void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid) {
         chan = sdscatlen(chan, "__:", 3);
         chan = sdscatsds(chan, key->ptr);
         chanobj = createObject(OBJ_STRING, chan);
+        // 发送通知
         pubsubPublishMessage(chanobj, eventobj);
         decrRefCount(chanobj);
     }
@@ -54,5 +55,55 @@ void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid) {
         decrRefCount(chanobj);
     }
     decrRefCount(eventobj);
+}
+
+
+/* Publish a message */
+// 发送消息
+// pubsubPublishMessage即是PUBLISH的实现
+int pubsubPublishMessage(robj *channel, robj *message) {
+    int receivers = 0;
+    dictEntry *de;
+    dictIterator *di;
+    listNode *ln;
+    listIter li;
+
+    /* Send to clients listening for that channel */
+    de = dictFind(server.pubsub_channels,channel);
+    if (de) {
+        list *list = dictGetVal(de);
+        listNode *ln;
+        listIter li;
+
+        listRewind(list,&li);
+        while ((ln = listNext(&li)) != NULL) {
+            client *c = ln->value;
+            addReplyPubsubMessage(c,channel,message);
+            receivers++;
+        }
+    }
+    /* Send to clients listening to matching channels */
+    di = dictGetIterator(server.pubsub_patterns_dict);
+    if (di) {
+        channel = getDecodedObject(channel);
+        while((de = dictNext(di)) != NULL) {
+            robj *pattern = dictGetKey(de);
+            list *clients = dictGetVal(de);
+            if (!stringmatchlen((char*)pattern->ptr,
+                                sdslen(pattern->ptr),
+                                (char*)channel->ptr,
+                                sdslen(channel->ptr),0)) continue;
+
+            listRewind(clients,&li);
+            while ((ln = listNext(&li)) != NULL) {
+                client *c = listNodeValue(ln);
+                addReplyPubsubPatMessage(c,pattern,channel,message);
+                receivers++;
+            }
+        }
+        decrRefCount(channel);
+        dictReleaseIterator(di);
+    }
+    return receivers;
 }
 ```
