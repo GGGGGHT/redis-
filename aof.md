@@ -53,3 +53,14 @@ unsigned long aofRewriteBufferSize(void);
 ```
 
 当`AOF`持久化功能处于打开状态时，服务器在执行赛克一个写命令之后，会以协议格式将被执行的命令将被执行的写命令追加到服务器状态的`aof_buf`缓冲区末尾。
+
+```
+# appendfsync always
+appendfsync everysec
+# appendfsync no
+```
+在配置文件中 `appendfsync`选项的值直接决定AOF持久化功能的效率和安全性
+- always 服务器在每个事件循环都要将`aof_buf`缓冲区中的所有内容写入到AOF文件中，并且同步AOF文件。 优点: 安全性最高 缺点: 效率最低
+- everysec 在每个事件循环都要将`aof_buf`缓冲区的所有内容写入到AOF文件，并且每隔一秒要在子线程中对AOF文件进行同步， 安全与效率都是中等
+- no 服务器在每个事件循环都要将`aof_buf`缓冲区的内容写到AOF文件，到于何时将文件进行同步，则由操作系统控制 效率最高，但容易丢失最近写入的数据
+
