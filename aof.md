@@ -64,3 +64,164 @@ appendfsync everysec
 - everysec 在每个事件循环都要将`aof_buf`缓冲区的所有内容写入到AOF文件，并且每隔一秒要在子线程中对AOF文件进行同步， 安全与效率都是中等
 - no 服务器在每个事件循环都要将`aof_buf`缓冲区的内容写到AOF文件，到于何时将文件进行同步，则由操作系统控制 效率最高，但容易丢失最近写入的数据
 
+
+
+## AOF文件还原
+```c
+/* Replay the append log file. On success REDIS_OK is returned. On non fatal
+ * error (the append only file is zero-length) REDIS_ERR is returned. On
+ * fatal error an error message is logged and the program exists. */
+int loadAppendOnlyFile(char *filename) {
+    struct redisClient *fakeClient;
+    FILE *fp = fopen(filename,"r");
+    struct redis_stat sb;
+    int old_aof_state = server.aof_state;
+    long loops = 0;
+    off_t valid_up_to = 0; /* Offset of the latest well-formed command loaded. */
+
+    if (fp && redis_fstat(fileno(fp),&sb) != -1 && sb.st_size == 0) {
+        server.aof_current_size = 0;
+        fclose(fp);
+        return REDIS_ERR;
+    }
+
+    if (fp == NULL) {
+        redisLog(REDIS_WARNING,"Fatal error: can't open the append log file for reading: %s",strerror(errno));
+        exit(1);
+    }
+
+    /* Temporarily disable AOF, to prevent EXEC from feeding a MULTI
+     * to the same file we're about to read. */
+    server.aof_state = REDIS_AOF_OFF;
+
+    fakeClient = createFakeClient();
+    startLoading(fp);
+
+    while(1) {
+        int argc, j;
+        unsigned long len;
+        robj **argv;
+        char buf[128];
+        sds argsds;
+        struct redisCommand *cmd;
+
+        /* Serve the clients from time to time */
+        if (!(loops++ % 1000)) {
+            loadingProgress(ftello(fp));
+            processEventsWhileBlocked();
+        }
+
+        if (fgets(buf,sizeof(buf),fp) == NULL) {
+            if (feof(fp))
+                break;
+            else
+                goto readerr;
+        }
+        if (buf[0] != '*') goto fmterr;
+        if (buf[1] == '\0') goto readerr;
+        argc = atoi(buf+1);
+        if (argc < 1) goto fmterr;
+
+        argv = zmalloc(sizeof(robj*)*argc);
+        fakeClient->argc = argc;
+        fakeClient->argv = argv;
+
+        for (j = 0; j < argc; j++) {
+            if (fgets(buf,sizeof(buf),fp) == NULL) {
+                fakeClient->argc = j; /* Free up to j-1. */
+                freeFakeClientArgv(fakeClient);
+                goto readerr;
+            }
+            if (buf[0] != '$') goto fmterr;
+            len = strtol(buf+1,NULL,10);
+            argsds = sdsnewlen(NULL,len);
+            if (len && fread(argsds,len,1,fp) == 0) {
+                sdsfree(argsds);
+                fakeClient->argc = j; /* Free up to j-1. */
+                freeFakeClientArgv(fakeClient);
+                goto readerr;
+            }
+            argv[j] = createObject(REDIS_STRING,argsds);
+            if (fread(buf,2,1,fp) == 0) {
+                fakeClient->argc = j+1; /* Free up to j. */
+                freeFakeClientArgv(fakeClient);
+                goto readerr; /* discard CRLF */
+            }
+        }
+
+        /* Command lookup */
+        cmd = lookupCommand(argv[0]->ptr);
+        if (!cmd) {
+            redisLog(REDIS_WARNING,"Unknown command '%s' reading the append only file", (char*)argv[0]->ptr);
+            exit(1);
+        }
+
+        /* Run the command in the context of a fake client */
+        cmd->proc(fakeClient);
+
+        /* The fake client should not have a reply */
+        redisAssert(fakeClient->bufpos == 0 && listLength(fakeClient->reply) == 0);
+        /* The fake client should never get blocked */
+        redisAssert((fakeClient->flags & REDIS_BLOCKED) == 0);
+
+        /* Clean up. Command code may have changed argv/argc so we use the
+         * argv/argc of the client instead of the local variables. */
+        freeFakeClientArgv(fakeClient);
+        if (server.aof_load_truncated) valid_up_to = ftello(fp);
+    }
+
+    /* This point can only be reached when EOF is reached without errors.
+     * If the client is in the middle of a MULTI/EXEC, log error and quit. */
+    if (fakeClient->flags & REDIS_MULTI) goto uxeof;
+
+loaded_ok: /* DB loaded, cleanup and return REDIS_OK to the caller. */
+    fclose(fp);
+    freeFakeClient(fakeClient);
+    server.aof_state = old_aof_state;
+    stopLoading();
+    aofUpdateCurrentSize();
+    server.aof_rewrite_base_size = server.aof_current_size;
+    return REDIS_OK;
+
+readerr: /* Read error. If feof(fp) is true, fall through to unexpected EOF. */
+    if (!feof(fp)) {
+        redisLog(REDIS_WARNING,"Unrecoverable error reading the append only file: %s", strerror(errno));
+        exit(1);
+    }
+
+uxeof: /* Unexpected AOF end of file. */
+    if (server.aof_load_truncated) {
+        redisLog(REDIS_WARNING,"!!! Warning: short read while loading the AOF file !!!");
+        redisLog(REDIS_WARNING,"!!! Truncating the AOF at offset %llu !!!",
+            (unsigned long long) valid_up_to);
+        if (valid_up_to == -1 || truncate(filename,valid_up_to) == -1) {
+            if (valid_up_to == -1) {
+                redisLog(REDIS_WARNING,"Last valid command offset is invalid");
+            } else {
+                redisLog(REDIS_WARNING,"Error truncating the AOF file: %s",
+                    strerror(errno));
+            }
+        } else {
+            /* Make sure the AOF file descriptor points to the end of the
+             * file after the truncate call. */
+            if (server.aof_fd != -1 && lseek(server.aof_fd,0,SEEK_END) == -1) {
+                redisLog(REDIS_WARNING,"Can't seek the end of the AOF file: %s",
+                    strerror(errno));
+            } else {
+                redisLog(REDIS_WARNING,
+                    "AOF loaded anyway because aof-load-truncated is enabled");
+                goto loaded_ok;
+            }
+        }
+    }
+    redisLog(REDIS_WARNING,"Unexpected end of file reading the append only file. You can: 1) Make a backup of your AOF file, then use ./redis-check-aof --fix <filename>. 2) Alternatively you can set the 'aof-load-truncated' configuration option to yes and restart the server.");
+    exit(1);
+
+fmterr: /* Format error. */
+    redisLog(REDIS_WARNING,"Bad file format reading the append only file: make a backup of your AOF file, then use ./redis-check-aof --fix <filename>");
+    exit(1);
+}
+```
+服务器只需要读入AOF里的写入命令重新执行即可还原服务器关闭之前的数据库状态
+首先创建一个`redisClient`用来重放所有的写入命令
+从AOF文件中读取出一条命令 使用伪客户端去执行命令 当无法再从aof文件读取出内容时结束
