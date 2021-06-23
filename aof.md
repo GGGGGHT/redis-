@@ -455,3 +455,5 @@ if (o->encoding == OBJ_ENCODING_QUICKLIST) {
  auto-aof-rewrite-percentage 100
  auto-aof-rewrite-min-size 64mb
 ```
+
+执行完BGAOFREWRITE后aof的格式变为与rdb文件一样？？？
