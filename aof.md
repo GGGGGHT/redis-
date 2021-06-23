@@ -451,3 +451,7 @@ if (o->encoding == OBJ_ENCODING_QUICKLIST) {
 - OBJ_MODULE
 
 如果元素数量超过`AOF_REWRITE_ITEMS_PER_CMD`，则重写程序将使用多条命令来记录键的值，为了避免在执行命令时造成客户端输入缓冲区溢出
+```config
+ auto-aof-rewrite-percentage 100
+ auto-aof-rewrite-min-size 64mb
+```
