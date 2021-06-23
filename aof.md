@@ -454,6 +454,9 @@ if (o->encoding == OBJ_ENCODING_QUICKLIST) {
 ```config
  auto-aof-rewrite-percentage 100
  auto-aof-rewrite-min-size 64mb
+ 
+ aof-use-rdb-preamble no
 ```
+`aof-use-rdb-preamble`默认为`yes`，当该参数为yes时aof文件rewriter之后aof文件的格式会与rdb的文件格式一样 当该参数为no时，会使用aof的格式
 
-执行完BGAOFREWRITE后aof的格式变为与rdb文件一样？？？
+
