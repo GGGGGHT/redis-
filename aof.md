@@ -228,4 +228,172 @@ fmterr: /* Format error. */
 
 
 ## AOF重写
-原因： 因为AOF持久化是通过保存被执行的写命令来记录数据库状态的，所以随着服务器运行时间的流逝，AOF文件中的内容会越来越多，文件的体积也会越来越大，如果不加以控制的话，体积过大的AOF文件很可能对Redis服务器、甚至整个宿主计算机造成影响，并且AOF文件的体积越大，使用AOF文件来进行数据还原所需的时间就越多。
+原因： 因为AOF持久化是通过保存被执行的写命令来记录数据库状态的，所以随着服务器运行时间的流逝，AOF文件中的内容会越来越多，文件的体积也会越来越大，如果不加以控制的话，体积过大的AOF文件很可能对Redis服务器、甚至整个宿主计算机造成影响，并且AOF文件的体积越大，使用AOF文件来进行数据还原所需的时间就越多。 同时AOF里可能会有许多已过期的key，如果都进行命令重放，可能会影响效率
+
+为了解决AOF文件体积膨胀的问题，Redis提供了AOF文件重写功能
+```
+/* Write a sequence of commands able to fully rebuild the dataset into
+ * "filename". Used both by REWRITEAOF and BGREWRITEAOF.
+ *
+ * In order to minimize the number of commands needed in the rewritten
+ * log Redis uses variadic commands when possible, such as RPUSH, SADD
+ * and ZADD. However at max REDIS_AOF_REWRITE_ITEMS_PER_CMD items per time
+ * are inserted using a single command. */
+int rewriteAppendOnlyFile(char *filename) {
+    dictIterator *di = NULL;
+    dictEntry *de;
+    rio aof;
+    FILE *fp;
+    char tmpfile[256];
+    int j;
+    long long now = mstime();
+    char byte;
+    size_t processed = 0;
+
+    /* Note that we have to use a different temp name here compared to the
+     * one used by rewriteAppendOnlyFileBackground() function. */
+    snprintf(tmpfile,256,"temp-rewriteaof-%d.aof", (int) getpid());
+    fp = fopen(tmpfile,"w");
+    if (!fp) {
+        redisLog(REDIS_WARNING, "Opening the temp file for AOF rewrite in rewriteAppendOnlyFile(): %s", strerror(errno));
+        return REDIS_ERR;
+    }
+
+    server.aof_child_diff = sdsempty();
+    rioInitWithFile(&aof,fp);
+    if (server.aof_rewrite_incremental_fsync)
+        rioSetAutoSync(&aof,REDIS_AOF_AUTOSYNC_BYTES);
+    for (j = 0; j < server.dbnum; j++) {
+        char selectcmd[] = "*2\r\n$6\r\nSELECT\r\n";
+        redisDb *db = server.db+j;
+        dict *d = db->dict;
+        if (dictSize(d) == 0) continue;
+        di = dictGetSafeIterator(d);
+        if (!di) {
+            fclose(fp);
+            return REDIS_ERR;
+        }
+
+        /* SELECT the new DB */
+        if (rioWrite(&aof,selectcmd,sizeof(selectcmd)-1) == 0) goto werr;
+        if (rioWriteBulkLongLong(&aof,j) == 0) goto werr;
+
+        /* Iterate this DB writing every entry */
+        while((de = dictNext(di)) != NULL) {
+            sds keystr;
+            robj key, *o;
+            long long expiretime;
+
+            keystr = dictGetKey(de);
+            o = dictGetVal(de);
+            initStaticStringObject(key,keystr);
+
+            expiretime = getExpire(db,&key);
+
+            /* If this key is already expired skip it */
+            if (expiretime != -1 && expiretime < now) continue;
+
+            /* Save the key and associated value */
+            if (o->type == REDIS_STRING) {
+                /* Emit a SET command */
+                char cmd[]="*3\r\n$3\r\nSET\r\n";
+                if (rioWrite(&aof,cmd,sizeof(cmd)-1) == 0) goto werr;
+                /* Key and value */
+                if (rioWriteBulkObject(&aof,&key) == 0) goto werr;
+                if (rioWriteBulkObject(&aof,o) == 0) goto werr;
+            } else if (o->type == REDIS_LIST) {
+                if (rewriteListObject(&aof,&key,o) == 0) goto werr;
+            } else if (o->type == REDIS_SET) {
+                if (rewriteSetObject(&aof,&key,o) == 0) goto werr;
+            } else if (o->type == REDIS_ZSET) {
+                if (rewriteSortedSetObject(&aof,&key,o) == 0) goto werr;
+            } else if (o->type == REDIS_HASH) {
+                if (rewriteHashObject(&aof,&key,o) == 0) goto werr;
+            } else {
+                redisPanic("Unknown object type");
+            }
+            /* Save the expire time */
+            if (expiretime != -1) {
+                char cmd[]="*3\r\n$9\r\nPEXPIREAT\r\n";
+                if (rioWrite(&aof,cmd,sizeof(cmd)-1) == 0) goto werr;
+                if (rioWriteBulkObject(&aof,&key) == 0) goto werr;
+                if (rioWriteBulkLongLong(&aof,expiretime) == 0) goto werr;
+            }
+            /* Read some diff from the parent process from time to time. */
+            if (aof.processed_bytes > processed+1024*10) {
+                processed = aof.processed_bytes;
+                aofReadDiffFromParent();
+            }
+        }
+        dictReleaseIterator(di);
+        di = NULL;
+    }
+
+    /* Do an initial slow fsync here while the parent is still sending
+     * data, in order to make the next final fsync faster. */
+    if (fflush(fp) == EOF) goto werr;
+    if (fsync(fileno(fp)) == -1) goto werr;
+
+    /* Read again a few times to get more data from the parent.
+     * We can't read forever (the server may receive data from clients
+     * faster than it is able to send data to the child), so we try to read
+     * some more data in a loop as soon as there is a good chance more data
+     * will come. If it looks like we are wasting time, we abort (this
+     * happens after 20 ms without new data). */
+    int nodata = 0;
+    mstime_t start = mstime();
+    while(mstime()-start < 1000 && nodata < 20) {
+        if (aeWait(server.aof_pipe_read_data_from_parent, AE_READABLE, 1) <= 0)
+        {
+            nodata++;
+            continue;
+        }
+        nodata = 0; /* Start counting from zero, we stop on N *contiguous*
+                       timeouts. */
+        aofReadDiffFromParent();
+    }
+
+    /* Ask the master to stop sending diffs. */
+    if (write(server.aof_pipe_write_ack_to_parent,"!",1) != 1) goto werr;
+    if (anetNonBlock(NULL,server.aof_pipe_read_ack_from_parent) != ANET_OK)
+        goto werr;
+    /* We read the ACK from the server using a 10 seconds timeout. Normally
+     * it should reply ASAP, but just in case we lose its reply, we are sure
+     * the child will eventually get terminated. */
+    if (syncRead(server.aof_pipe_read_ack_from_parent,&byte,1,5000) != 1 ||
+        byte != '!') goto werr;
+    redisLog(REDIS_NOTICE,"Parent agreed to stop sending diffs. Finalizing AOF...");
+
+    /* Read the final diff if any. */
+    aofReadDiffFromParent();
+
+    /* Write the received diff to the file. */
+    redisLog(REDIS_NOTICE,
+        "Concatenating %.2f MB of AOF diff received from parent.",
+        (double) sdslen(server.aof_child_diff) / (1024*1024));
+    if (rioWrite(&aof,server.aof_child_diff,sdslen(server.aof_child_diff)) == 0)
+        goto werr;
+
+    /* Make sure data will not remain on the OS's output buffers */
+    if (fflush(fp) == EOF) goto werr;
+    if (fsync(fileno(fp)) == -1) goto werr;
+    if (fclose(fp) == EOF) goto werr;
+
+    /* Use RENAME to make sure the DB file is changed atomically only
+     * if the generate DB file is ok. */
+    if (rename(tmpfile,filename) == -1) {
+        redisLog(REDIS_WARNING,"Error moving temp append only file on the final destination: %s", strerror(errno));
+        unlink(tmpfile);
+        return REDIS_ERR;
+    }
+    redisLog(REDIS_NOTICE,"SYNC append only file rewrite performed");
+    return REDIS_OK;
+
+werr:
+    redisLog(REDIS_WARNING,"Write error writing append only file on disk: %s", strerror(errno));
+    fclose(fp);
+    unlink(tmpfile);
+    if (di) dictReleaseIterator(di);
+    return REDIS_ERR;
+}
+```
