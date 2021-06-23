@@ -267,6 +267,7 @@ int rewriteAppendOnlyFile(char *filename) {
         char selectcmd[] = "*2\r\n$6\r\nSELECT\r\n";
         redisDb *db = server.db+j;
         dict *d = db->dict;
+        // 忽略空的数据库
         if (dictSize(d) == 0) continue;
         di = dictGetSafeIterator(d);
         if (!di) {
@@ -275,15 +276,19 @@ int rewriteAppendOnlyFile(char *filename) {
         }
 
         /* SELECT the new DB */
+        // 写入SELECT命令
         if (rioWrite(&aof,selectcmd,sizeof(selectcmd)-1) == 0) goto werr;
+        // 写入选取的几号库
         if (rioWriteBulkLongLong(&aof,j) == 0) goto werr;
 
         /* Iterate this DB writing every entry */
+        // 对key进行迭代
         while((de = dictNext(di)) != NULL) {
             sds keystr;
             robj key, *o;
             long long expiretime;
 
+            // 获得k v
             keystr = dictGetKey(de);
             o = dictGetVal(de);
             initStaticStringObject(key,keystr);
@@ -291,14 +296,17 @@ int rewriteAppendOnlyFile(char *filename) {
             expiretime = getExpire(db,&key);
 
             /* If this key is already expired skip it */
+            // 如果该key已过期 则跳过
             if (expiretime != -1 && expiretime < now) continue;
 
             /* Save the key and associated value */
+            // 根据不同的类型来保存其key和value
             if (o->type == REDIS_STRING) {
                 /* Emit a SET command */
                 char cmd[]="*3\r\n$3\r\nSET\r\n";
                 if (rioWrite(&aof,cmd,sizeof(cmd)-1) == 0) goto werr;
                 /* Key and value */
+                // 写入key 写入value
                 if (rioWriteBulkObject(&aof,&key) == 0) goto werr;
                 if (rioWriteBulkObject(&aof,o) == 0) goto werr;
             } else if (o->type == REDIS_LIST) {
@@ -313,6 +321,7 @@ int rewriteAppendOnlyFile(char *filename) {
                 redisPanic("Unknown object type");
             }
             /* Save the expire time */
+            // 写入过期时间
             if (expiretime != -1) {
                 char cmd[]="*3\r\n$9\r\nPEXPIREAT\r\n";
                 if (rioWrite(&aof,cmd,sizeof(cmd)-1) == 0) goto werr;
@@ -397,3 +406,48 @@ werr:
     return REDIS_ERR;
 }
 ```
+
+rewriteListObject
+```c
+if (o->encoding == OBJ_ENCODING_QUICKLIST) {
+       // 获取list的头
+        quicklist *list = o->ptr;
+        // 获取遍历方式 从头开始
+        quicklistIter *li = quicklistGetIterator(list, AL_START_HEAD);
+        quicklistEntry entry;
+        
+        while (quicklistNext(li,&entry)) {
+            if (count == 0) {
+                int cmd_items = (items > AOF_REWRITE_ITEMS_PER_CMD) ?
+                    AOF_REWRITE_ITEMS_PER_CMD : items;
+                // 重写后会将所有的item一次性写入
+                if (rioWriteBulkCount(r,'*',2+cmd_items) == 0) return 0;
+                if (rioWriteBulkString(r,"RPUSH",5) == 0) return 0;
+                if (rioWriteBulkObject(r,key) == 0) return 0;
+            }
+
+            if (entry.value) {
+                if (rioWriteBulkString(r,(char*)entry.value,entry.sz) == 0) return 0;
+            } else {
+                if (rioWriteBulkLongLong(r,entry.longval) == 0) return 0;
+            }
+            if (++count == AOF_REWRITE_ITEMS_PER_CMD) count = 0;
+            items--;
+        }
+        quicklistReleaseIterator(li);
+    }
+```
+根据不同类型去重写AOF:
+- OBJ_STRING: 直接写key，value
+- OBJ_LIST: 如果编码是OBJ_ENCODING_QUICKLIST
+- OBJ_SET
+ * OBJ_ENCODING_INTSET: 以字符串的形式写入AOF文件中
+ * OBJ_ENCODING_HT: 写入sds
+- OBJ_ZSET
+ * OBJ_ENCODING_ZIPLIST
+ * OBJ_ENCODING_SKIPLIST
+- OBJ_HASH
+- OBJ_STREAM
+- OBJ_MODULE
+
+如果元素数量超过`AOF_REWRITE_ITEMS_PER_CMD`，则重写程序将使用多条命令来记录键的值，为了避免在执行命令时造成客户端输入缓冲区溢出
