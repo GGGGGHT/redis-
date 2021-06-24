@@ -99,16 +99,84 @@ typedef struct client {
 -------------
 |redisclient|
 -------------
-|...        |
+|    ...    |
 -------------
 |argc   3   |
 -------------               -------------------------------------
 |argv       |    ------->   | argv[0]   |argv[1]   | argv[2]     |
 -------------               --------------------------------------
-|...        |               | SET       | key      | value       | 
+|reply      |               | SET       | key      | value       | 
 -------------               --------------------------------------
+|buf        |
+-------------
+|bufpos     |
+-------------
+|    ...    |
+-------------
 </pre>
 
 `redisCommand *cmd, *lastcmd` 当服务器从协议内容中分析并得出argv的属性和argc属性的值后，服务器将根据argv[0]的值，在命令表中查询命令所对应的命令处理函数 
 cmd即保存着该命令的处理函数 
 ![查找命令处理函数的流程](https://res.weread.qq.com/wrepub/epub_622000_202)
+
+## Response
+<pre>
+/* Response buffer */
+int bufpos;
+char buf[PROTO_REPLY_CHUNK_BYTES];
+</pre>
+
+```c
+/* Add a Redis Object as a bulk reply */
+void addReplyBulk(client *c, robj *obj) {
+    addReplyBulkLen(c,obj);
+    addReply(c,obj);
+    addReply(c,shared.crlf);
+}
+
+/* Add the object 'obj' string representation to the client output buffer. */
+void addReply(client *c, robj *obj) {
+    if (prepareClientToWrite(c) != C_OK) return;
+
+    if (sdsEncodedObject(obj)) {
+        if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != C_OK)
+            _addReplyProtoToList(c,obj->ptr,sdslen(obj->ptr));
+    } else if (obj->encoding == OBJ_ENCODING_INT) {
+        /* For integer encoded strings we just convert it into a string
+         * using our optimized function, and attach the resulting string
+         * to the output buffer. */
+        char buf[32];
+        size_t len = ll2string(buf,sizeof(buf),(long)obj->ptr);
+        if (_addReplyToBuffer(c,buf,len) != C_OK)
+            _addReplyProtoToList(c,buf,len);
+    } else {
+        serverPanic("Wrong obj->encoding in addReply()");
+    }
+}
+
+/* Attempts to add the reply to the static buffer in the client struct.
+ * Returns C_ERR if the buffer is full, or the reply list is not empty,
+ * in which case the reply must be added to the reply list. */
+int _addReplyToBuffer(client *c, const char *s, size_t len) {
+    size_t available = sizeof(c->buf)-c->bufpos;
+
+    if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return C_OK;
+
+    /* If there already are entries in the reply list, we cannot
+     * add anything more to the static buffer. */
+    if (listLength(c->reply) > 0) return C_ERR;
+
+    /* Check that the buffer has enough space available for this string. */
+    if (len > available) return C_ERR;
+
+    memcpy(c->buf+c->bufpos,s,len);
+    c->bufpos+=len;
+    return C_OK;
+}
+```
+响应时将对象拷贝到客户端的`buf`中 并增加`bufpos`
+`buf`是一个大小为`16K`的字节数组，`bufpos`保存了当前buf数组所使用的字节数量
+首先先判断`reply`回复列表中是否有数据 如果有数据证明`buf`已满 不能再向`buf`中写入数据 而应该向`reply`中写响应的数据
+如果返回的数据的长度大于当前buf可用的容量 则返回错误
+`buf`是一个大小为`16K`的字节数组，`bufpos`保存了当前buf数组所使用的字节数量
+
