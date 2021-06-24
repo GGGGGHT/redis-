@@ -1,6 +1,6 @@
 # server 
 
-## server执行命令的的过程
+## server执行命令的的前置判断
 ```c
 
 /* If this function gets called we already read a whole
@@ -273,3 +273,22 @@ int processCommand(client *c) {
   8. 如果服务器因为执行Lua脚本而超时并进入阻塞状态，那么服务器只会执行客户端发来的SHUTDOWN nosave命令和SCRIPT KILL命令，其他命令都会被服务器拒绝
   9. 如果客户端正在执行事务，那么服务器只会执行客户端发来的EXEC、DISCARD、MULTI、WATCH四个命令，其他命令都会被放进事务队列中。
   10. 如果服务器打开了监视器功能，那么服务器会将要执行的命令和参数等信息发送给监视器。当完成了以上预备操作之后，服务器就可以开始真正执行命令了。
+
+## 执行命令
+```c
+/* Exec the command */
+    if (c->flags & CLIENT_MULTI &&
+        c->cmd->proc != execCommand && c->cmd->proc != discardCommand &&
+        c->cmd->proc != multiCommand && c->cmd->proc != watchCommand)
+    {
+        queueMultiCommand(c);
+        addReply(c,shared.queued);
+    } else {
+        call(c,CMD_CALL_FULL);
+        c->woff = server.master_repl_offset;
+        if (listLength(server.ready_keys))
+            handleClientsBlockedOnKeys();
+    }
+```
+如果命令在事务中执行`queueMultiCommand`否则执行`call`其中最重要的是执行`c->cmd->proc(c);`
+因为要执行命令所需要的实际参数都已经保存到客户端状态的argv参数中，所以命令的实现函数只需要一个指向客户端状态的指针作为参数即可。被调用的命令实现函数会执行指定的操作，并产生相应的命令回复，这些回复会被保存在客户端状态的输出缓冲区里面。之后实现函数会为客户端的套接字关联命令回复处理器，这个处理器负责将命令回复返回给客户端。
