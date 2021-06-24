@@ -460,3 +460,9 @@ if (o->encoding == OBJ_ENCODING_QUICKLIST) {
 `aof-use-rdb-preamble`默认为`yes`，当该参数为yes时aof文件rewriter之后aof文件的格式会与rdb的文件格式一样 当该参数为no时，会使用aof的格式
 
 
+
+<b>通常情况下，Redis只会将那些对数据库进行了修改的命令写入到AOF文件中，并复制到各个从服务器。如果一个命令没有对数据库进行任何修改，那么它就会被认为是只读命令，这个命令不会被写入到
+AOF文件，也不会被复制到从服务器中.
+ 但是`PUBSUB`和`SCRIPT LOAD`命令是例外。`PUBSUB`命令虽然没有修改数据库，但向频道的所有订阅者发送消息这一行为带有副作用。接收到消息的所有客户端的状态都会因为这个命令而改变。
+ `SCRIPT LOAD`与`PUBSUB`类似
+</b>
