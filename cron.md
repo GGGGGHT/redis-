@@ -277,7 +277,10 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     return 1000/server.hz;
 }
 
+
 ```
+客户端定时任务 断开超时的客户端
+
 
 ## client cron
 ```c
