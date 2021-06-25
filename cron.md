@@ -57,6 +57,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         }
     }
 
+     // 100ms更新一次瞬时指标
     run_with_period(100) {
         trackInstantaneousMetric(STATS_METRIC_COMMAND,server.stat_numcommands);
         trackInstantaneousMetric(STATS_METRIC_NET_INPUT,
@@ -279,10 +280,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
 
 ```
-客户端定时任务 断开超时的客户端
+
 
 
 ## client cron
+客户端定时任务 断开超时的客户端
 ```c
 /* This function is called by serverCron() and is used in order to perform
  * operations on clients that are important to perform constantly. For instance
