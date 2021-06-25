@@ -338,3 +338,63 @@ void clientsCron(void) {
     }
 }
 ```
+
+## database cron 
+数据库定时： key过期,rehash,resizing
+```c
+/* This function handles 'background' operations we are required to do
+ * incrementally in Redis databases, such as active key expiring, resizing,
+ * rehashing. */
+void databasesCron(void) {
+    /* Expire keys by random sampling. Not required for slaves
+     * as master will synthesize DELs for us. */
+    if (server.active_expire_enabled) {
+        if (iAmMaster()) {
+            activeExpireCycle(ACTIVE_EXPIRE_CYCLE_SLOW);
+        } else {
+            expireSlaveKeys();
+        }
+    }
+
+    /* Defrag keys gradually. */
+    activeDefragCycle();
+
+    /* Perform hash tables rehashing if needed, but only if there are no
+     * other processes saving the DB on disk. Otherwise rehashing is bad
+     * as will cause a lot of copy-on-write of memory pages. */
+    if (!hasActiveChildProcess()) {
+        /* We use global counters so if we stop the computation at a given
+         * DB we'll be able to start from the successive in the next
+         * cron loop iteration. */
+        static unsigned int resize_db = 0;
+        static unsigned int rehash_db = 0;
+        int dbs_per_call = CRON_DBS_PER_CALL;
+        int j;
+
+        /* Don't test more DBs than we have. */
+        if (dbs_per_call > server.dbnum) dbs_per_call = server.dbnum;
+
+        /* Resize */
+        for (j = 0; j < dbs_per_call; j++) {
+            tryResizeHashTables(resize_db % server.dbnum);
+            resize_db++;
+        }
+
+        /* Rehash */
+        if (server.activerehashing) {
+            for (j = 0; j < dbs_per_call; j++) {
+                int work_done = incrementallyRehash(rehash_db);
+                if (work_done) {
+                    /* If the function did some work, stop here, we'll do
+                     * more at the next cron loop. */
+                    break;
+                } else {
+                    /* If this db didn't need rehash, we'll try the next one. */
+                    rehash_db++;
+                    rehash_db %= server.dbnum;
+                }
+            }
+        }
+    }
+}
+```
