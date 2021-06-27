@@ -76,3 +76,82 @@ void sentinelIsRunning(void) {
  ```
  
  `sentinel`执行的工作和普通Redis服务器执行的工作不同,所以Sentinel的初始化过程不会载入RDB或AOF文件来还原数据库状态
+
+
+
+##　选举新的master
+```c
+/* Scan all the Sentinels attached to this master to check if there
+ * is a leader for the specified epoch.
+ *
+ * To be a leader for a given epoch, we should have the majority of
+ * the Sentinels we know (ever seen since the last SENTINEL RESET) that
+ * reported the same instance as leader for the same epoch. */
+char *sentinelGetLeader(sentinelRedisInstance *master, uint64_t epoch) {
+    dict *counters;
+    dictIterator *di;
+    dictEntry *de;
+    unsigned int voters = 0, voters_quorum;
+    char *myvote;
+    char *winner = NULL;
+    uint64_t leader_epoch;
+    uint64_t max_votes = 0;
+
+    redisAssert(master->flags & (SRI_O_DOWN|SRI_FAILOVER_IN_PROGRESS));
+    counters = dictCreate(&leaderVotesDictType,NULL);
+
+    voters = dictSize(master->sentinels)+1; /* All the other sentinels and me. */
+
+    /* Count other sentinels votes */
+    di = dictGetIterator(master->sentinels);
+    while((de = dictNext(di)) != NULL) {
+        sentinelRedisInstance *ri = dictGetVal(de);
+        if (ri->leader != NULL && ri->leader_epoch == sentinel.current_epoch)
+            sentinelLeaderIncr(counters,ri->leader);
+    }
+    dictReleaseIterator(di);
+
+    /* Check what's the winner. For the winner to win, it needs two conditions:
+     * 1) Absolute majority between voters (50% + 1).
+     * 2) And anyway at least master->quorum votes. */
+    di = dictGetIterator(counters);
+    while((de = dictNext(di)) != NULL) {
+        uint64_t votes = dictGetUnsignedIntegerVal(de);
+
+        if (votes > max_votes) {
+            max_votes = votes;
+            winner = dictGetKey(de);
+        }
+    }
+    dictReleaseIterator(di);
+
+    /* Count this Sentinel vote:
+     * if this Sentinel did not voted yet, either vote for the most
+     * common voted sentinel, or for itself if no vote exists at all. */
+    if (winner)
+        myvote = sentinelVoteLeader(master,epoch,winner,&leader_epoch);
+    else
+        myvote = sentinelVoteLeader(master,epoch,server.runid,&leader_epoch);
+
+    if (myvote && leader_epoch == epoch) {
+        uint64_t votes = sentinelLeaderIncr(counters,myvote);
+
+        if (votes > max_votes) {
+            max_votes = votes;
+            winner = myvote;
+        }
+    }
+
+    voters_quorum = voters/2+1;
+    if (winner && (max_votes < voters_quorum || max_votes < master->quorum))
+        winner = NULL;
+
+    winner = winner ? sdsnew(winner) : NULL;
+    sdsfree(myvote);
+    dictRelease(counters);
+    return winner;
+}
+```
+
+选举新的sentinel的规则:
+1. 所有在线的Sentinel都有被选为领头的资格,监视同一个主服务器的多个Sentinel中的任意一个都有可能成为领头Sentinel
