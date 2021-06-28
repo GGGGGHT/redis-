@@ -155,3 +155,12 @@ char *sentinelGetLeader(sentinelRedisInstance *master, uint64_t epoch) {
 
 选举新的sentinel的规则:
 1. 所有在线的Sentinel都有被选为领头的资格,监视同一个主服务器的多个Sentinel中的任意一个都有可能成为领头Sentinel
+
+
+
+### fail over 故障转移
+
+在选举产生出领头Sentinel之后，领头Sentinel将对已下线的主服务器执行故障转移操作
+1. 在已下线主服务器发我下的所有从服务器里面，挑选出一个从服务器，并将其转换为主服务器
+2. 让已下线主服务器发我下的所有从服务器改为复制新的主服务器
+3. 将已下线主服务器设置为新的主服务器的从服务器，当这个旧的主服务器重新上线时，它就会成为新的主服务器的从服务器
