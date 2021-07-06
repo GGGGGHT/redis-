@@ -10,10 +10,17 @@ struct redisServer {
     int notify_keyspace_events; /* Events to propagate via Pub/Sub. This is an
                                    xor of NOTIFY_... flags. */
 ...
+
+typedef struct pubsubPattern {
+    client *client;
+    robj *pattern;
+} pubsubPattern;
+
 }
 
 `pubsub_channels`保存所有的频道订阅关系
 `pubsub_patterns`保存所有的模式订阅关系
+
 ```c
 
 void subscribeCommand(client *c) {
