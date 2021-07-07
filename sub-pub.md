@@ -58,4 +58,6 @@ int pubsubSubscribeChannel(client *c, robj *channel) {
     return retval;
 }
 ```
+
+command `pubsub NUMSUB` 列出指定信道的订阅者数量
 # redis publish
