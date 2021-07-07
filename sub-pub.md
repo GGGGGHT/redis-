@@ -61,3 +61,9 @@ int pubsubSubscribeChannel(client *c, robj *channel) {
 
 command `pubsub NUMSUB` 列出指定信道的订阅者数量
 # redis publish
+
+
+
+#
+
+服务器状态在pubsub_channels字典保存了所有频道的订阅关系：SUBSCRIBE命令负责将客户端和被订阅的频道关联到这个字典里面，而UNSUBSCRIBE命令则负责解除客户端和被退订频道之间的关联。
